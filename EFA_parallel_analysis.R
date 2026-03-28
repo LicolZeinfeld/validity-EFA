@@ -1,6 +1,6 @@
 # ============================================================
 # EFA_Sunbok.R
-
+# ============================================================
 
 suppressPackageStartupMessages({
   library(readr)
@@ -11,11 +11,13 @@ suppressPackageStartupMessages({
 # -----------------------------
 # file paths
 # -----------------------------
-humans_csv <- "~/Desktop/CASEd/Reliability/Factor Analysis/chemistry_humans.csv"
-bots_csv   <- "~/Desktop/CASEd/Reliability/Factor Analysis/chemistry_chatbots.csv"
+humans_csv <- "~/Desktop/CASEd/Reliability/Factor Analysis/psychometric_q2_humans.csv"
+bots_csv   <- "~/Desktop/CASEd/Reliability/Factor Analysis/psychometric_q2_chatbots.csv"
+
 
 pairs <- list()
-drop_items <- character(0)
+
+drop_items <- c()
 
 rotate_method  <- "oblimin"
 fm_method      <- "minres"
@@ -25,27 +27,16 @@ use_parallel_analysis <- TRUE
 pa_n_iter <- 30
 
 alpha <- 0.05
-boot_B <- 300
-
-# Determinism controls
-master_seed <- 20260223   
-set_rng_kind <- TRUE      
-
-
 
 # Optional: save results to RDS
 save_results_rds <- TRUE
 results_rds_path <- "~/Desktop/CASEd/Reliability/Factor Analysis/efa_chemistry_results.rds"
+save_plots <- TRUE
+out_dir <- "~/Desktop/CASEd/Reliability/Factor Analysis/efa_kaiser_outputs"
 
 # ============================================================
 # Helpers
 # ============================================================
-
-if (set_rng_kind) {
-  # helps reproducibility across machines/R versions (not perfect, but better)
-  suppressWarnings(RNGkind(kind = "Mersenne-Twister", normal.kind = "Inversion", sample.kind = "Rejection"))
-}
-set.seed(master_seed)
 
 read_binary_noheader <- function(path, prefix = "Q") {
   df <- read_csv(path, col_names = FALSE, show_col_types = FALSE)
@@ -87,7 +78,7 @@ tetra_cor_smooth <- function(df) {
   R <- psych::tetrachoric(df)$rho
   R <- psych::cor.smooth(R)
   diag(R) <- 1
-  R <- R + diag(1e-8, nrow(R))  
+  R <- R + diag(1e-8, nrow(R))
   diag(R) <- 1
   R
 }
@@ -133,94 +124,6 @@ fit_group_solution <- function(R, n_obs, k_start, rotate, fm, label) {
   stop(sprintf("[%s] All K produced Heywood/NA issues. Consider fewer items / more N / different settings.", label))
 }
 
-# ------------------------------------------------------------
-# Bootstrap significance for loadings (deterministic)
-# ------------------------------------------------------------
-bootstrap_loading_sig <- function(df, nfactors, rotate, fm, B, seed, alpha) {
-  stopifnot(alpha > 0 && alpha < 1)
-  set.seed(seed)
-  
-  R0 <- tetra_cor_smooth(df)
-  fit0 <- run_fa(R0, nrow(df), nfactors, rotate, fm)
-  L0 <- get_loadings_matrix(fit0)
-  rownames(L0) <- colnames(df)
-  colnames(L0) <- paste0("F", seq_len(ncol(L0)))
-  
-  boot_array <- array(NA_real_, dim = c(nrow(L0), ncol(L0), B),
-                      dimnames = list(rownames(L0), colnames(L0), NULL))
-  
-  for (b in seq_len(B)) {
-    idx <- sample.int(nrow(df), replace = TRUE)
-    dfb <- df[idx, , drop = FALSE]
-    
-    # skip replicate if any item becomes constant (tetrachoric fails)
-    ok <- TRUE
-    for (j in seq_len(ncol(dfb))) {
-      u <- unique(dfb[[j]][!is.na(dfb[[j]])])
-      if (length(u) < 2) { ok <- FALSE; break }
-    }
-    if (!ok) next
-    
-    Rb <- try(tetra_cor_smooth(dfb), silent = TRUE)
-    if (inherits(Rb, "try-error")) next
-    
-    fb <- try(run_fa(Rb, nrow(dfb), nfactors, rotate, fm), silent = TRUE)
-    if (inherits(fb, "try-error")) next
-    
-    Lb <- get_loadings_matrix(fb)
-    rownames(Lb) <- colnames(df)
-    colnames(Lb) <- paste0("F", seq_len(ncol(Lb)))
-    
-    # Align permutation using congruence; ensure 1-to-1 mapping via greedy unique assignment
-    cong <- psych::factor.congruence(Lb, L0)  # (boot factors) x (orig factors) in most versions
-    
-    # Make sure dimensions match expectation
-    if (nrow(cong) != ncol(Lb) || ncol(cong) != ncol(L0)) next
-    
-    # Greedy unique assignment: for each orig factor, pick best unused boot factor
-    perm <- integer(ncol(L0))
-    used <- rep(FALSE, ncol(Lb))
-    for (k in seq_len(ncol(L0))) {
-      scores <- cong[, k]
-      scores[used] <- -Inf
-      j <- which.max(scores)
-      if (!is.finite(scores[j])) { perm[k] <- NA_integer_; next }
-      perm[k] <- j
-      used[j] <- TRUE
-    }
-    if (any(is.na(perm))) next
-    
-    Lb_aligned <- Lb[, perm, drop = FALSE]
-    colnames(Lb_aligned) <- colnames(L0)
-    
-    # Sign alignment
-    for (k in seq_len(ncol(L0))) {
-      if (cor(Lb_aligned[, k], L0[, k], use = "pairwise.complete.obs") < 0) {
-        Lb_aligned[, k] <- -Lb_aligned[, k]
-      }
-    }
-    
-    boot_array[, , b] <- Lb_aligned
-  }
-  
-  lo_p <- alpha / 2
-  hi_p <- 1 - alpha / 2
-  lo <- apply(boot_array, c(1, 2), quantile, probs = lo_p, na.rm = TRUE)
-  hi <- apply(boot_array, c(1, 2), quantile, probs = hi_p, na.rm = TRUE)
-  sig <- (lo > 0) | (hi < 0)
-  
-  list(
-    fit = fit0,
-    loadings = L0,
-    ci_lo = lo,
-    ci_hi = hi,
-    sig = sig,
-    alpha = alpha,
-    B = B,
-    seed = seed
-  )
-}
-
 # ============================================================
 # Load & Prepare (align items so groups match)
 # ============================================================
@@ -253,7 +156,7 @@ cat("Final #items used (common, nonzero variance):", ncol(hum), "\n")
 if (ncol(hum) < 3) stop("Too few usable items after filtering.")
 
 # ============================================================
-# Factor count suggestion (deterministic)
+# Factor count suggestion
 # ============================================================
 
 R_h <- tetra_cor_smooth(hum)
@@ -269,13 +172,23 @@ K_h_start <- kai_h$nfactors
 K_b_start <- kai_b$nfactors
 
 if (use_parallel_analysis) {
-  set.seed(master_seed + 100)  # deterministic PA (humans)
-  pa_h <- psych::fa.parallel(hum, fm = fm_method, fa = "fa", cor = "tet",
-                             n.iter = pa_n_iter, plot = TRUE)
+  pa_h <- psych::fa.parallel(
+    hum,
+    fm = fm_method,
+    fa = "fa",
+    cor = "tet",
+    n.iter = pa_n_iter,
+    plot = FALSE
+  )
   
-  set.seed(master_seed + 200)  # deterministic PA (bots)
-  pa_b <- psych::fa.parallel(bot, fm = fm_method, fa = "fa", cor = "tet",
-                             n.iter = pa_n_iter, plot = TRUE)
+  pa_b <- psych::fa.parallel(
+    bot,
+    fm = fm_method,
+    fa = "fa",
+    cor = "tet",
+    n.iter = pa_n_iter,
+    plot = FALSE
+  )
   
   if (!is.null(pa_h$nfact) && !is.na(pa_h$nfact) && pa_h$nfact >= 1) K_h_start <- pa_h$nfact
   if (!is.null(pa_b$nfact) && !is.na(pa_b$nfact) && pa_b$nfact >= 1) K_b_start <- pa_b$nfact
@@ -288,43 +201,48 @@ if (use_parallel_analysis) {
 # Fit EFA (separate groups; step-down only if inadmissible)
 # ============================================================
 
-cat("\n=== PRIMARY: Separate EFA fits ===\n")
-cat("Humans: start K =", K_h_start, "\n")
-fit_h <- fit_group_solution(R_h, nrow(hum), K_h_start, rotate_method, fm_method, "HUMANS")
-fa_h <- fit_h$fa
-K_h_final <- fit_h$K
+# ============================================================
+# Fit EFA (separate groups; step-down only if inadmissible)
+# ============================================================
 
-cat("Bots:   start K =", K_b_start, "\n")
-fit_b <- fit_group_solution(R_b, nrow(bot), K_b_start, rotate_method, fm_method, "BOTS")
-fa_b <- fit_b$fa
-K_b_final <- fit_b$K
+# ============================================================
+# Fit EFA exactly at the selected K (NO step-down)
+# ============================================================
+
+cat("\n=== PRIMARY: Separate EFA fits (NO step-down) ===\n")
+cat("Humans: fitting K =", K_h_start, "\n")
+fa_h <- run_fa(R_h, nrow(hum), K_h_start, rotate_method, fm_method)
+
+cat("Bots:   fitting K =", K_b_start, "\n")
+fa_b <- run_fa(R_b, nrow(bot), K_b_start, rotate_method, fm_method)
+
+K_h_final <- K_h_start
+K_b_final <- K_b_start
 
 cat("\n[FINAL separate K]\n")
 cat(" - Humans K =", K_h_final, "\n")
 cat(" - Bots   K =", K_b_final, "\n\n")
 
+if (save_plots) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-# ============================================================
-# Bootstrap significance (deterministic, separate seeds)
-# ============================================================
+source("~/Desktop/CASEd/Reliability/Factor Analysis/Generate_Loading_Graph.R")
 
-cat("=== Bootstrapping loading significance ===\n")
-boot_h <- bootstrap_loading_sig(
-  hum, nfactors = K_h_final, rotate = rotate_method, fm = fm_method,
-  B = boot_B, seed = master_seed + 1000, alpha = alpha
+plot_comparison_loading_graph(
+  efa_h = fa_h,
+  efa_b = fa_b,
+  title_text = "Chemistry: Humans vs Bots Loading Graph",
+  cutoff = loading_cutoff,
+  label_cutoff = 0.40,
+  file = file.path(out_dir, "comparison_loading_graph.png")
 )
 
-boot_b <- bootstrap_loading_sig(
-  bot, nfactors = K_b_final, rotate = rotate_method, fm = fm_method,
-  B = boot_B, seed = master_seed + 2000, alpha = alpha
-)
+# Optional safety check: report but do NOT step down
+if (has_heywood(fa_h)) {
+  warning(sprintf("[HUMANS] K=%d produced Heywood/NA issues, but no step-down was applied.", K_h_final))
+}
 
-boot_b_forced <- NULL
-if (compute_forced_models && !is.null(fa_b_forced) && !isTRUE(forced_rejected)) {
-  boot_b_forced <- bootstrap_loading_sig(
-    bot, nfactors = forced_K_bots, rotate = rotate_method, fm = fm_method,
-    B = boot_B, seed = master_seed + 3000, alpha = alpha
-  )
+if (has_heywood(fa_b)) {
+  warning(sprintf("[BOTS] K=%d produced Heywood/NA issues, but no step-down was applied.", K_b_final))
 }
 
 # ============================================================
@@ -334,52 +252,50 @@ if (compute_forced_models && !is.null(fa_b_forced) && !isTRUE(forced_rejected)) 
 results <- list(
   data = list(hum = hum, bot = bot, keep_items = keep_items),
   selection = list(
-    humans = list(kaiser = kai_h, K_start = K_h_start, K_final = K_h_final, rejected_from = fit_h$rejected_from),
-    bots   = list(kaiser = kai_b, K_start = K_b_start, K_final = K_b_final, rejected_from = fit_b$rejected_from),
+    humans = list(
+      kaiser = kai_h,
+      K_start = K_h_start,
+      K_final = K_h_final,
+      rejected_from = NULL
+    ),
+    bots = list(
+      kaiser = kai_b,
+      K_start = K_b_start,
+      K_final = K_b_final,
+      rejected_from = NULL
+    ),
     parallel = if (use_parallel_analysis) list(humans = pa_h, bots = pa_b) else NULL
   ),
   efa = list(
-    humans = list(fa = fa_h, loadings = boot_h$loadings, ci_lo = boot_h$ci_lo, ci_hi = boot_h$ci_hi, sig = boot_h$sig),
-    bots   = list(fa = fa_b, loadings = boot_b$loadings, ci_lo = boot_b$ci_lo, ci_hi = boot_b$ci_hi, sig = boot_b$sig),
-    bots_forced = if (!is.null(boot_b_forced)) list(
-      K_forced = forced_K_bots,
-      fa = fa_b_forced,
-      loadings = boot_b_forced$loadings,
-      ci_lo = boot_b_forced$ci_lo,
-      ci_hi = boot_b_forced$ci_hi,
-      sig = boot_b_forced$sig
-    ) else if (!is.null(fa_b_forced)) list(
-      K_forced = forced_K_bots,
-      fa = fa_b_forced,
-      inadmissible = forced_rejected
-    ) else NULL
+    humans = list(
+      fa = fa_h,
+      loadings = get_loadings_matrix(fa_h)
+    ),
+    bots = list(
+      fa = fa_b,
+      loadings = get_loadings_matrix(fa_b)
+    )
   ),
   meta = list(
     rotate_method = rotate_method,
     fm_method = fm_method,
     loading_cutoff = loading_cutoff,
     alpha = alpha,
-    boot_B = boot_B,
-    master_seed = master_seed,
     pa_n_iter = pa_n_iter
   )
 )
+
+
 
 if (save_results_rds) {
   saveRDS(results, results_rds_path)
   cat("Saved results RDS to:", results_rds_path, "\n")
 }
 
+
+
 cat("\n===== HUMANS EFA (final) =====\n")
 print(results$efa$humans$fa)
 
 cat("\n===== BOTS EFA (final) =====\n")
 print(results$efa$bots$fa)
-
-if (compute_forced_models && !is.null(results$efa$bots_forced)) {
-  cat(sprintf("\n===== BOTS EFA (forced K=%d) =====\n", forced_K_bots))
-  print(results$efa$bots_forced$fa)
-  if (!is.null(results$efa$bots_forced$inadmissible)) {
-    cat("Forced model inadmissible:", results$efa$bots_forced$inadmissible, "\n")
-  }
-}
