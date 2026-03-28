@@ -20,8 +20,8 @@ suppressPackageStartupMessages({
 # -----------------------------
 # USER CONFIG
 # -----------------------------
-humans_csv <- "~/Desktop/CASEd/Reliability/Factor Analysis/psychometric_q1_humans.csv"
-bots_csv   <- "~/Desktop/CASEd/Reliability/Factor Analysis/psychometric_q1_chatbots.csv"
+humans_csv <- "~/Desktop/CASEd/Reliability/Factor Analysis/chemistry_humans.csv"
+bots_csv   <- "~/Desktop/CASEd/Reliability/Factor Analysis/chemistry_chatbots.csv"
 
 rotate_method <- "oblimin"
 fm_method     <- "minres"
@@ -106,6 +106,12 @@ plot_loadings_base <- function(fa_obj, title_text) {
 # -----------------------------
 hum <- read_binary_noheader(humans_csv, prefix = "Q")
 bot <- read_binary_noheader(bots_csv, prefix = "Q")
+
+# manually drop selected items
+items_to_drop <- c("Q8", "Q10", "Q12", "Q1", "Q17")
+
+hum <- hum[, !(names(hum) %in% items_to_drop), drop = FALSE]
+bot <- bot[, !(names(bot) %in% items_to_drop), drop = FALSE]
 
 # remove zero-variance items separately first
 hum <- drop_zero_variance(hum)
